@@ -45,6 +45,7 @@
 #include "QtCookiePolicy.h"
 #include "QtDrawnFavicons.h"
 #include "QtEnginePaths.h"
+#include "QtExtensionWindows.h"
 #include "QtHeldDownloads.h"
 #include "QtPageFonts.h"
 #include "QtSecureDns.h"
@@ -447,6 +448,11 @@ int main(int argc, char *argv[])
     omaweb::QtWebRtcPolicy engineWebRtcPolicy(&webRtcPolicy);
     QObject::connect(&engineContentBlocker, &omaweb::QtContentBlocker::profileAttached,
         &engineWebRtcPolicy, &omaweb::QtWebRtcPolicy::attachToProfile);
+    // Where an extension's window is, which it places windows of its own
+    // from: the main window or the Tab window holding the page (#684).
+    omaweb::QtExtensionWindows extensionWindows;
+    QObject::connect(&engineContentBlocker, &omaweb::QtContentBlocker::profileAttached,
+        &extensionWindows, &omaweb::QtExtensionWindows::attachToProfile);
     // The plugin an input method needs is the desktop's to install, and a
     // desktop that names one it has not installed leaves Qt with no input
     // context and Omaweb with no text-input protocol bound. Nothing about that
@@ -589,6 +595,7 @@ int main(int argc, char *argv[])
     if (auto *window = engine.rootObjects().isEmpty()
             ? nullptr
             : qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst())) {
+        extensionWindows.setMainWindow(window);
         QObject::connect(
             window, &QQuickWindow::frameSwapped, window,
             [] { omaweb::markStartupPhase("first-frame"); }, Qt::SingleShotConnection);
