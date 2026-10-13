@@ -56,6 +56,11 @@ namespace {
             .toJson(QJsonDocument::Indented);
     }
 
+    bool hasEmptyDefault(const QString &name)
+    {
+        return SettingsFile::text(SettingsFile::defaultValue(name)).isEmpty();
+    }
+
     void setError(QString *destination, const QString &message)
     {
         if (destination) {
@@ -793,7 +798,10 @@ bool SyncModule::resolveMergeConflicts(QString *errorMessage)
                 = gitOutput({QStringLiteral("show"), QStringLiteral(":2:") + path}, &localRead);
             const auto remote
                 = gitOutput({QStringLiteral("show"), QStringLiteral(":3:") + path}, &remoteRead);
-            if (!localRead || !remoteRead) {
+            // Where one side removed a setting's record, returning it to an
+            // empty default, and the other changed it, the change wins.
+            const bool setting = path.startsWith(QLatin1String("settings/"));
+            if ((!localRead || !remoteRead) && !(setting && (localRead || remoteRead))) {
                 setError(errorMessage,
                     QCoreApplication::translate(
                         "SyncModule", "Could not read conflicting Sync settings"));
@@ -801,7 +809,10 @@ bool SyncModule::resolveMergeConflicts(QString *errorMessage)
             }
             const auto localHash = QCryptographicHash::hash(local, QCryptographicHash::Sha256);
             const auto remoteHash = QCryptographicHash::hash(remote, QCryptographicHash::Sha256);
-            const auto &winner = remoteHash > localHash ? remote : local;
+            const auto &winner = !localRead ? remote
+                : !remoteRead               ? local
+                : remoteHash > localHash    ? remote
+                                            : local;
             QSaveFile file(QDir(checkoutRoot()).filePath(path));
             if (!file.open(QIODevice::WriteOnly) || file.write(winner) != winner.size()
                 || !file.commit()
@@ -1135,12 +1146,14 @@ bool SyncModule::writeAppliedRecordInventory(QString *errorMessage) const
         inventory.insert(kind, records);
     }
     QJsonObject configuration;
-    for (const auto &relativePath : {QStringLiteral("config/keybindings.json"),
-             QStringLiteral("settings/content-blocking.json"),
-             QStringLiteral("settings/floating-controls.json"),
-             QStringLiteral("settings/use-favicons.json"),
-             QStringLiteral("settings/tint-favicons.json"),
-             QStringLiteral("settings/app-icon.json")}) {
+    // Every synced setting, so a key the reader takes out of the file is
+    // captured as their return to its default rather than restored over (#740).
+    QStringList relativePaths {QStringLiteral("config/keybindings.json"),
+        QStringLiteral("settings/content-blocking.json")};
+    for (const auto &name : syncedPreferences) {
+        relativePaths.append(QStringLiteral("settings/%1.json").arg(name));
+    }
+    for (const auto &relativePath : std::as_const(relativePaths)) {
         QFile file(QDir(checkoutRoot()).filePath(relativePath));
         if (file.open(QIODevice::ReadOnly)) {
             configuration.insert(relativePath, digest(file.readAll()));
@@ -1254,10 +1267,23 @@ bool SyncModule::stageConfigurationFile(
 bool SyncModule::restoreConfiguration(QString *errorMessage)
 {
     const auto settingsDirectory = QDir(checkoutRoot()).filePath(QStringLiteral("settings"));
+    // A baseline written before this machine first applied anything lists its
+    // own settings, not records it applied, and has no applied tree.
+    const auto inventory = readJsonObject(
+        QDir(m_options.dataRoot).filePath(QStringLiteral("sync/applied-records.json")));
+    const auto applied = inventory.contains(QStringLiteral("appliedTree"))
+        ? inventory.value(QStringLiteral("configuration")).toObject()
+        : QJsonObject {};
     QJsonObject synced;
     for (const auto &name : syncedPreferences) {
         const auto record = readJsonObject(QDir(settingsDirectory).filePath(name + ".json"));
         if (record.isEmpty()) {
+            // A record of a setting with an empty default that was applied
+            // here and is gone now is another machine's return to the default.
+            if (hasEmptyDefault(name)
+                && applied.contains(QStringLiteral("settings/%1.json").arg(name))) {
+                synced.insert(name, QJsonValue::Null);
+            }
             continue;
         }
         const auto value
@@ -1380,6 +1406,24 @@ bool SyncModule::captureConfiguration(QString *errorMessage)
         // A value the reader wrote that cannot be read is not their choice of
         // the default, so it is not sent to the other machines as one.
         if (settings.invalidKeys().contains(name)) {
+            continue;
+        }
+        // A setting whose default is empty, as the browser theme's is, goes
+        // back to it as no record: a record of an empty value is one 0.16.0
+        // rejects, and that fails its whole restore (#740). A record that is
+        // not the one applied here is another machine's change still waiting
+        // to be applied, and stays.
+        if (!settings.isSet(name) && hasEmptyDefault(name)) {
+            QFile record(QDir(checkoutRoot()).filePath(path));
+            const bool appliedHere = record.open(QIODevice::ReadOnly)
+                && digest(record.readAll()) == applied.value(path).toString();
+            record.close();
+            if (appliedHere && !record.remove()) {
+                setError(errorMessage,
+                    QCoreApplication::translate(
+                        "SyncModule", "Could not stage Sync configuration"));
+                return false;
+            }
             continue;
         }
         if (!stageConfigurationFile(
