@@ -369,6 +369,10 @@ private slots:
     void adaptersTakeTheShellsAutoplayDecision_data();
     void adaptersTakeTheShellsAutoplayDecision();
     void qtReportsTheProcessDrawingThePage();
+    void qtKeepsAPlayingPageAudibleThroughASilence_data();
+    void qtKeepsAPlayingPageAudibleThroughASilence();
+    void qtLeavesMediaThatMakesNoSoundQuiet();
+    void qtLetsASoundEndBesideMutedMedia();
     void qtKeepsAFrozenTabInsideItsMemoryBudget();
     void adaptersReportTheConnectionFromTheirOwnFacts_data();
     void adaptersReportTheConnectionFromTheirOwnFacts();
@@ -9070,6 +9074,220 @@ void QtEngineContractTest::qtReportsTheProcessDrawingThePage()
         adapter->property("pageTitle").toString(), QStringLiteral("Served"), 20000);
     QTRY_VERIFY(adapter->property("renderProcessPid").toInt() > 0);
     QVERIFY(resources.residentBytes(adapter->property("renderProcessPid").toInt()) > 0);
+}
+
+namespace {
+
+// Half a second of tone and three of silence, in one clip that plays the whole
+// time, the way a video's quiet scene does. The engine calls a page audible
+// for only a moment after its last sound, about a quarter of a second on this
+// engine, so the silence outlasts that many times over. The query varies it:
+// - `frame` plays the clip in a frame from another site, the way an embedded
+//   video does, and `remove` as well takes that frame away during the silence.
+// - `pause` pauses the clip during the silence.
+// - `silent` makes the clip silence throughout.
+// - `muted` mutes the clip and plays a short sound of its own beside it.
+const char silentStretchPage[] = R"HTML(<!doctype html><title>loading</title><script>
+    const query = new URLSearchParams(location.search);
+    if (query.has('frame') && window === window.top) {
+        const frame = document.createElement('iframe');
+        frame.src = location.href.replace('127.0.0.1', 'localhost');
+        addEventListener('message', event => {
+            document.title = event.data;
+            if (query.has('remove') && event.data === 'playing')
+                setTimeout(() => {
+                    frame.remove();
+                    document.title = 'removed';
+                }, 2500);
+        });
+        document.documentElement.append(frame);
+    } else {
+        const rate = 8000;
+        const clipOf = parts => {
+        const samples = parts.reduce((total, part) => total + part[0], 0);
+        const wave = new DataView(new ArrayBuffer(44 + samples * 2));
+        const text = (offset, value) =>
+            [...value].forEach((c, i) => wave.setUint8(offset + i, c.charCodeAt(0)));
+        text(0, 'RIFF');
+        wave.setUint32(4, 36 + samples * 2, true);
+        text(8, 'WAVEfmt ');
+        wave.setUint32(16, 16, true);
+        wave.setUint16(20, 1, true);
+        wave.setUint16(22, 1, true);
+        wave.setUint32(24, rate, true);
+        wave.setUint32(28, rate * 2, true);
+        wave.setUint16(32, 2, true);
+        wave.setUint16(34, 16, true);
+        text(36, 'data');
+        wave.setUint32(40, samples * 2, true);
+        let sample = 0;
+        for (const [length, sounding] of parts) {
+            for (let i = 0; i < length; ++i, ++sample)
+                wave.setInt16(44 + sample * 2,
+                    sounding ? Math.sin(sample / rate * 2 * Math.PI * 440) * 12000 : 0, true);
+        }
+        const clip = document.createElement('audio');
+        clip.src = URL.createObjectURL(new Blob([wave.buffer], {type: 'audio/wav'}));
+        document.documentElement.append(clip);
+        return clip;
+        };
+        const tell = state => window === window.top
+            ? document.title = state : window.top.postMessage(state, '*');
+        const clip = clipOf([[rate / 2, !query.has('silent') && !query.has('muted')],
+            [rate * 3, false]]);
+        for (const state of ['playing', 'pause', 'ended'])
+            clip.addEventListener(state, () => tell(clip.ended ? 'ended' : state));
+        if (query.has('pause'))
+            clip.addEventListener('playing', () => setTimeout(() => clip.pause(), 2500));
+        if (query.has('muted')) {
+            clip.muted = true;
+            const sound = clipOf([[rate / 4, true]]);
+            sound.addEventListener('ended', () => tell('sounded'));
+            clip.addEventListener('playing', () => sound.play());
+        }
+        clip.play();
+    }
+</script>)HTML";
+
+} // namespace
+
+void QtEngineContractTest::qtKeepsAPlayingPageAudibleThroughASilence_data()
+{
+    QTest::addColumn<QString>("query");
+    QTest::addColumn<bool>("shown");
+    QTest::addColumn<QString>("stop");
+    QTest::newRow("clip that ends") << QString() << true << QStringLiteral("ended");
+    QTest::newRow("clip the page pauses")
+        << QStringLiteral("pause") << true << QStringLiteral("pause");
+    QTest::newRow("frame's clip in a hidden view")
+        << QStringLiteral("frame") << false << QStringLiteral("ended");
+    QTest::newRow("frame the page takes away")
+        << QStringLiteral("frame&remove") << true << QStringLiteral("removed");
+}
+
+// A page that is playing is making sound through its quiet stretches too. The
+// shell keeps the tab's speaker, keeps a hidden page running and keeps the
+// tab from being put away on this one answer, so a silence in a video that is
+// still playing must not read as the sound having stopped: a hidden page
+// frozen there could never make sound again. The answer still goes when the
+// playing does.
+void QtEngineContractTest::qtKeepsAPlayingPageAudibleThroughASilence()
+{
+    QFETCH(QString, query);
+    QFETCH(bool, shown);
+    QFETCH(QString, stop);
+    PageServer server(silentStretchPage);
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QQmlEngine engine;
+    QQmlComponent component(
+        &engine, QUrl::fromLocalFile(QStringLiteral(OMAWEB_QT_ENGINE_VIEW_PATH)));
+    const std::unique_ptr<QObject> adapter(component.createWithInitialProperties({
+        {QStringLiteral("profilePath"), root.filePath(QStringLiteral("profile"))},
+    }));
+    QVERIFY2(adapter, qPrintable(component.errorString()));
+    auto *view = qobject_cast<QQuickItem *>(adapter.get());
+    QVERIFY(view);
+    QQuickWindow window;
+    window.resize(640, 480);
+    view->setParentItem(window.contentItem());
+    view->setSize(QSizeF(640, 480));
+    view->setVisible(shown);
+    window.show();
+    // Heard by the engine, not by whoever runs the tests.
+    QVERIFY(adapter->setProperty("audioMuted", true));
+    QVERIFY(adapter->setProperty("autoplayAllowed", true));
+
+    QVERIFY(adapter->setProperty("currentUrl",
+        QUrl(QStringLiteral("http://127.0.0.1:%1/page.html?%2")
+                .arg(server.serverPort())
+                .arg(query))));
+    QTRY_VERIFY_WITH_TIMEOUT(adapter->property("pageAudible").toBool(), 15000);
+    QSignalSpy changes(adapter.get(), SIGNAL(pageAudibleChanged()));
+    QVERIFY(changes.isValid());
+
+    // Well into the silence, and well short of where the page stops it.
+    QTest::qWait(1500);
+    QCOMPARE(changes.count(), 0);
+    QTRY_COMPARE_WITH_TIMEOUT(adapter->property("pageTitle").toString(), stop, 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(!adapter->property("pageAudible").toBool(), 5000);
+}
+
+// Playing is not sound. A video playing on its own with nothing to hear, as a
+// muted one on a page's front does, gives the tab no speaker: only a page that
+// has been heard is kept audible through a silence.
+void QtEngineContractTest::qtLeavesMediaThatMakesNoSoundQuiet()
+{
+    PageServer server(silentStretchPage);
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QQmlEngine engine;
+    QQmlComponent component(
+        &engine, QUrl::fromLocalFile(QStringLiteral(OMAWEB_QT_ENGINE_VIEW_PATH)));
+    const std::unique_ptr<QObject> adapter(component.createWithInitialProperties({
+        {QStringLiteral("profilePath"), root.filePath(QStringLiteral("profile"))},
+    }));
+    QVERIFY2(adapter, qPrintable(component.errorString()));
+    auto *view = qobject_cast<QQuickItem *>(adapter.get());
+    QVERIFY(view);
+    QQuickWindow window;
+    window.resize(640, 480);
+    view->setParentItem(window.contentItem());
+    view->setSize(QSizeF(640, 480));
+    window.show();
+    QVERIFY(adapter->setProperty("audioMuted", true));
+    QVERIFY(adapter->setProperty("autoplayAllowed", true));
+
+    QSignalSpy changes(adapter.get(), SIGNAL(pageAudibleChanged()));
+    QVERIFY(changes.isValid());
+    QVERIFY(adapter->setProperty("currentUrl",
+        QUrl(QStringLiteral("http://127.0.0.1:%1/page.html?silent").arg(server.serverPort()))));
+    QTRY_COMPARE_WITH_TIMEOUT(
+        adapter->property("pageTitle").toString(), QStringLiteral("playing"), 15000);
+    QTest::qWait(1500);
+    QCOMPARE(changes.count(), 0);
+    QVERIFY(!adapter->property("pageAudible").toBool());
+}
+
+// Muted media is not what was heard, even when the page made a sound of its
+// own beside it: a click or a chime ends, and the muted video playing on does
+// not keep the tab's speaker.
+void QtEngineContractTest::qtLetsASoundEndBesideMutedMedia()
+{
+    PageServer server(silentStretchPage);
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QQmlEngine engine;
+    QQmlComponent component(
+        &engine, QUrl::fromLocalFile(QStringLiteral(OMAWEB_QT_ENGINE_VIEW_PATH)));
+    const std::unique_ptr<QObject> adapter(component.createWithInitialProperties({
+        {QStringLiteral("profilePath"), root.filePath(QStringLiteral("profile"))},
+    }));
+    QVERIFY2(adapter, qPrintable(component.errorString()));
+    auto *view = qobject_cast<QQuickItem *>(adapter.get());
+    QVERIFY(view);
+    QQuickWindow window;
+    window.resize(640, 480);
+    view->setParentItem(window.contentItem());
+    view->setSize(QSizeF(640, 480));
+    window.show();
+    QVERIFY(adapter->setProperty("audioMuted", true));
+    QVERIFY(adapter->setProperty("autoplayAllowed", true));
+
+    QVERIFY(adapter->setProperty("currentUrl",
+        QUrl(QStringLiteral("http://127.0.0.1:%1/page.html?muted").arg(server.serverPort()))));
+    QTRY_VERIFY_WITH_TIMEOUT(adapter->property("pageAudible").toBool(), 15000);
+    QTRY_COMPARE_WITH_TIMEOUT(
+        adapter->property("pageTitle").toString(), QStringLiteral("sounded"), 5000);
+    // The muted clip plays on for three seconds more.
+    QTRY_VERIFY_WITH_TIMEOUT(!adapter->property("pageAudible").toBool(), 1500);
+    QCOMPARE(adapter->property("pageTitle").toString(), QStringLiteral("sounded"));
 }
 
 namespace {
