@@ -404,11 +404,13 @@ Item {
                     + JSON.stringify(fields) + "," + Number(serial) + ")",
                     WebEngineScript.ApplicationWorld);
     }
+    // A page's typing reaches every world, so the flag is kept where the page
+    // cannot read or set it.
     property var editedStateScript: {
         const script = WebEngine.script();
         script.name = "Omaweb edited form state";
         script.injectionPoint = WebEngineScript.DocumentReady;
-        script.worldId = WebEngineScript.MainWorld;
+        script.worldId = WebEngineScript.ApplicationWorld;
         script.runsOnSubFrames = false;
         script.sourceCode = "globalThis.__omawebContentEditableEdited = false;"
                 + "document.addEventListener('input', event => {"
@@ -1383,10 +1385,9 @@ Item {
     function invokeMediaAction(command) {
         if (!webView)
             return;
-        webView.runJavaScript("globalThis.__omawebMediaSession && "
-                              + "globalThis.__omawebMediaSession.invoke(" + JSON.stringify(String(
-                                                                                               command))
-                              + ");");
+        webView.runJavaScript("document.dispatchEvent(new Event(" + JSON.stringify(
+                                  root.mediaKeyToken + String(command)) + "));",
+                              WebEngineScript.ApplicationWorld);
     }
 
     function configureKeyboardNavigation(configuration) {
@@ -1399,7 +1400,8 @@ Item {
             return;
         webView.runJavaScript("globalThis.__omawebKeyboardNavigation && "
                               + "globalThis.__omawebKeyboardNavigation.configure(" + JSON.stringify(
-                                  keyboardNavigationConfiguration) + ");");
+                                  root.pageKeyboardNavigationConfiguration()) + ");",
+                              WebEngineScript.ApplicationWorld);
     }
     // Content blocking owns the Refusal tally for the document on show, so
     // this view says which document that is and keeps no count of its own.
@@ -1471,7 +1473,7 @@ Item {
         // blue first. Subframes draw controls of their own and are their own
         // documents, so they need it too.
         script.injectionPoint = WebEngineScript.DocumentCreation;
-        script.worldId = WebEngineScript.MainWorld;
+        script.worldId = WebEngineScript.ApplicationWorld;
         script.runsOnSubFrames = true;
         script.sourceCode = root.styleSheetSnippet(root.controlAccentSheetId,
                                                    root.controlAccentStyleSheet);
@@ -1489,7 +1491,8 @@ Item {
         if (!root.completed)
             return;
         webView.runJavaScript(root.styleSheetSnippet(root.controlAccentSheetId,
-                                                     root.controlAccentStyleSheet));
+                                                     root.controlAccentStyleSheet),
+                              WebEngineScript.ApplicationWorld);
     }
 
     // The collection is written whole once, by its binding, while the view is
@@ -1578,7 +1581,7 @@ Item {
         const script = WebEngine.script();
         script.name = "Omaweb page palette";
         script.injectionPoint = WebEngineScript.DocumentCreation;
-        script.worldId = WebEngineScript.MainWorld;
+        script.worldId = WebEngineScript.ApplicationWorld;
         script.runsOnSubFrames = true;
         script.sourceCode = root.pagePaletteSnippet(root.pagePaletteStyleSheet);
         return script;
@@ -1590,7 +1593,8 @@ Item {
     onPagePaletteStyleSheetChanged: {
         if (!root.completed)
             return;
-        webView.runJavaScript(root.pagePaletteSnippet(root.pagePaletteStyleSheet));
+        webView.runJavaScript(root.pagePaletteSnippet(root.pagePaletteStyleSheet),
+                              WebEngineScript.ApplicationWorld);
     }
 
     // ---- the page's own scrollbar ------------------------------------------
@@ -1615,7 +1619,7 @@ Item {
         const script = WebEngine.script();
         script.name = "Omaweb page scrollbar";
         script.injectionPoint = WebEngineScript.DocumentCreation;
-        script.worldId = WebEngineScript.MainWorld;
+        script.worldId = WebEngineScript.ApplicationWorld;
         // The document's own scroller only. A subframe is its own document with
         // its own scroller, and the shell draws one bar for the page it is
         // showing rather than one per frame.
@@ -1652,8 +1656,11 @@ Item {
     // mode report is the one line still sent unsealed, from the shared script
     // in `src/engine/api`.
     readonly property string reportHead: "__omaweb_"
-    readonly property string reportToken: {
-        let drawn = "";
+    readonly property string reportToken: root.drawnToken()
+    // A name no page can guess. It starts with a letter, so it can be an
+    // element's id and a selector for one.
+    function drawnToken() {
+        let drawn = String.fromCharCode(97 + Math.floor(Math.random() * 26));
         for (let part = 0; part < 3; ++part)
             drawn += Math.random().toString(36).slice(2);
         return drawn;
@@ -1766,7 +1773,10 @@ Item {
     // replaces the rules in it, rather than adopting a second one.
     //
     // The sheet is found by a mark on the sheet itself because a document
-    // keeps no names for the sheets it adopts. An empty sheet is not worth
+    // keeps no names for the sheets it adopts. Every snippet here runs in
+    // Omaweb's world, and a mark set there is a property of that world's
+    // object for the sheet: the page shares the sheet and its rules, but its
+    // own object for it carries no mark. An empty sheet is not worth
     // adopting, so nothing is adopted until there are rules to carry, and a
     // page that drops the sheet from the list gets it back on the next
     // application. The rules are written every time rather than only when they
@@ -1820,7 +1830,7 @@ Item {
     // or the ads they cover appear and then vanish; a scriptlet has to be
     // there before the page's first script, or the anti-adblock check it
     // neutralises has already run. Document creation is the only injection
-    // point early enough for either, and the script has to be rebuilt for each
+    // point early enough for either, and the scripts have to be rebuilt for each
     // navigation because both depend on the host being loaded.
     //
     // It is installed on the Engine profile, not on the view, and matched to
@@ -1834,7 +1844,11 @@ Item {
     // installed longest ago go once there are more than the limit; one left
     // stale by a rule or site change is replaced by the next navigation to
     // it, before any document there is created.
+    //
+    // The stylesheet and the scriptlets are two scripts, because the sheet is
+    // adopted in Omaweb's world and a scriptlet runs in the page's.
     readonly property string blockingScriptNamePrefix: "Omaweb content blocking "
+    readonly property string blockingSheetNamePrefix: "Omaweb cosmetic sheet "
     readonly property int blockingScriptLimit: 16
     // The pattern the engine matches against the document's address, which
     // it spells without the scheme's default port.
@@ -1847,32 +1861,37 @@ Item {
             return;
         const css = contentBlocker.cosmeticStyleSheet(url);
         const scriptlets = contentBlocker.scriptletSource(url);
-        // The stylesheet goes first: hiding what the page is about to render
-        // does not depend on a scriptlet, and a scriptlet that throws must not
-        // take the hiding with it.
-        const source = (css.length > 0 ? root.styleSheetSnippet(root.cosmeticSheetId, css) + ";\n" :
-                                         "") + root.scriptletSnippet(scriptlets);
         const pattern = root.blockingScriptPattern(url);
-        const name = root.blockingScriptNamePrefix + pattern;
+        // The stylesheet is a script of its own and goes first: hiding what
+        // the page is about to render does not depend on a scriptlet, and a
+        // scriptlet that throws cannot take the hiding with it.
+        root.installBlockingScriptPart(root.blockingSheetNamePrefix, pattern,
+                                       WebEngineScript.ApplicationWorld, css.length > 0
+                                       ? root.styleSheetSnippet(root.cosmeticSheetId, css) : "");
+        root.installBlockingScriptPart(root.blockingScriptNamePrefix, pattern,
+                                       WebEngineScript.MainWorld, root.scriptletSnippet(
+                                           scriptlets));
+        // The document about to be created carries whatever these scripts add
+        // and nothing else, so what the last one had is no longer there.
+        root.cosmeticRulesInjected = css.length > 0;
+    }
+    function installBlockingScriptPart(prefix, pattern, world, source) {
+        const name = prefix + pattern;
         const scripts = webView.profile.userScripts;
         let script = null;
         if (source.length > 0) {
             script = WebEngine.script();
             script.name = name;
             script.injectionPoint = WebEngineScript.DocumentCreation;
-            script.worldId = WebEngineScript.MainWorld;
+            script.worldId = world;
             script.runsOnSubFrames = false;
             script.sourceCode = "// ==UserScript==\n// @include " + pattern
                     + "\n// ==/UserScript==\n" + source;
         }
         root.replaceScript(scripts, name, script);
-        const blocking = scripts.collection.filter(installed => installed.name.startsWith(
-                                                                    root.blockingScriptNamePrefix));
+        const blocking = scripts.collection.filter(installed => installed.name.startsWith(prefix));
         while (blocking.length > root.blockingScriptLimit)
             scripts.remove(blocking.shift());
-        // The document about to be created carries whatever this script adds
-        // and nothing else, so what the last one had is no longer there.
-        root.cosmeticRulesInjected = css.length > 0;
     }
 
     // Re-application into a document that is already open, for a rule set or a
@@ -1890,7 +1909,8 @@ Item {
         if (css.length === 0 && !cosmeticRulesInjected)
             return;
         cosmeticRulesInjected = css.length > 0;
-        webView.runJavaScript(root.styleSheetSnippet(root.cosmeticSheetId, css));
+        webView.runJavaScript(root.styleSheetSnippet(root.cosmeticSheetId, css),
+                              WebEngineScript.ApplicationWorld);
     }
 
     // The generic rules are the ones written against no particular site, and
@@ -1919,8 +1939,8 @@ Item {
     // The survey and its watch run in the application world, as the
     // reporting scripts do, so a page that replaces `MutationObserver` in its
     // own world, as a page hiding from a content blocker does, takes nothing
-    // away from them. The stylesheets stay in the page's world, where the
-    // page's own scripts and the tests can see them.
+    // away from them. The stylesheets are adopted from there too: the page
+    // sees the sheets and their rules, and not Omaweb's mark on them.
     property int lateCosmeticSurveyLimit: 32
     property int lateCosmeticSurveyInterval: 100
 
@@ -1930,9 +1950,6 @@ Item {
             root.forEachFrame(frame.children[index], act);
     }
     // A frame's runJavaScript is overloaded and needs the callback to pick one.
-    function runInFrame(frame, script) {
-        frame.runJavaScript(script, WebEngineScript.MainWorld, function () {});
-    }
     function runInFrameApplicationWorld(frame, script) {
         frame.runJavaScript(script, WebEngineScript.ApplicationWorld, function () {});
     }
@@ -2059,7 +2076,7 @@ Item {
         const clear = genericCosmeticRulesInjected ? root.styleSheetSnippet(
                                                          root.genericCosmeticSheetId, "") : "";
         if (siteRepair.length > 0 || clear.length > 0)
-            root.runInFrame(frame, siteRepair + clear);
+            root.runInFrameApplicationWorld(frame, siteRepair + clear);
         root.runInFrameApplicationWorld(frame, root.stopCosmeticWatchSnippet);
     }
     // What a frame reported: the whole document, which replaces what the frame
@@ -2082,8 +2099,8 @@ Item {
         if (!survey.whole) {
             if (css.length > 0) {
                 root.genericCosmeticRulesInjected = true;
-                root.runInFrame(frame, root.appendStyleSheetSnippet(root.genericCosmeticSheetId,
-                                                                    css));
+                root.runInFrameApplicationWorld(frame, root.appendStyleSheetSnippet(
+                                                    root.genericCosmeticSheetId, css));
             }
             return;
         }
@@ -2095,7 +2112,7 @@ Item {
         if (css.length > 0)
             root.genericCosmeticRulesInjected = true;
         if (repair.length > 0 || sheet.length > 0)
-            root.runInFrame(frame, repair + sheet);
+            root.runInFrameApplicationWorld(frame, repair + sheet);
     }
     function readCosmeticSurvey(text) {
         let survey;
@@ -2171,7 +2188,7 @@ Item {
                               + "for (const option of document.querySelectorAll('select option')) {"
                               + "if (option.selected !== option.defaultSelected) return true;"
                               + "}" + "return Boolean(globalThis.__omawebContentEditableEdited);"
-                              + "})()", callback);
+                              + "})()", WebEngineScript.ApplicationWorld, callback);
     }
     function acceptNewWindowRequest(request) {
         if (request)
@@ -2658,16 +2675,26 @@ Item {
 
     onDeveloperToolsColorsChanged: root.applyDeveloperToolsTheme()
 
+    // Keys, clicks and focus are the document's in every world, so link hints
+    // run in Omaweb's own, where the page cannot find their handle. What they
+    // draw in the page is named by a token of this view's, not by Omaweb.
+    // Not read-only: a test that drives the hints from the page names it.
+    property string keyboardHintToken: root.drawnToken()
+    function pageKeyboardNavigationConfiguration() {
+        return Object.assign({}, root.keyboardNavigationConfiguration, {
+                                 "elementToken": root.keyboardHintToken
+                             });
+    }
     property var keyboardNavigationScript: {
         const script = WebEngine.script();
         script.name = "Omaweb Keyboard navigation";
         script.injectionPoint = WebEngineScript.DocumentReady;
-        script.worldId = WebEngineScript.MainWorld;
+        script.worldId = WebEngineScript.ApplicationWorld;
         script.runsOnSubFrames = false;
         script.sourceCode = root.keyboardNavigationScriptSource
                 + "\nglobalThis.__omawebKeyboardNavigation && "
                 + "globalThis.__omawebKeyboardNavigation.configure(" + JSON.stringify(
-                    root.keyboardNavigationConfiguration) + ");";
+                    root.pageKeyboardNavigationConfiguration()) + ");";
         return script;
     }
     onKeyboardNavigationScriptChanged: root.installUserScript(root.keyboardNavigationScript.name,
@@ -2844,9 +2871,16 @@ Item {
     // not. A page that registered none is answered by the element that is
     // sounding, which is what a video in a tab with no media session is.
     //
-    // This one runs in the page's world, because the setters it wraps are the
-    // page's own and a wrapper in another world would see none of the page's
-    // writes. It runs before the page does and keeps the console it found.
+    // This one runs in the page's world, because the setters and the method
+    // it wraps are the page's own and a wrapper in another world would see
+    // none of the page's writes. It runs before the page does and keeps the
+    // console it found.
+    //
+    // So it holds no global the page could find or call. A key arrives as an
+    // event on the document whose type is drawn here and never given to the
+    // page, and it is sent from Omaweb's own world, where a page that wraps
+    // `dispatchEvent` or `Event` sees nothing of it.
+    readonly property string mediaKeyToken: root.drawnToken()
     property var mediaSessionScript: {
         const script = WebEngine.script();
         script.name = "Omaweb media session";
@@ -2854,9 +2888,13 @@ Item {
         script.worldId = WebEngineScript.MainWorld;
         script.runsOnSubFrames = false;
         script.sourceCode = `(() => {
-            if (globalThis.__omawebMediaSession) return;
-            ` + root.reportSnippet() + `
             const session = navigator.mediaSession;
+            // A session this script has already run on has a setActionHandler
+            // that is not the engine's: the wrapper defined below.
+            if (session && !Function.prototype.toString.call(
+                    Object.getPrototypeOf(session).setActionHandler).includes('[native code]'))
+                return;
+            ` + root.reportSnippet() + `
             const handlers = new Map();
             let reported = '';
             const elements = () => Array.from(document.querySelectorAll('video, audio'));
@@ -2905,39 +2943,51 @@ Item {
                 report('media_session', declaration);
             };
             // The API reports no change of its own, so the two properties a
-            // page writes are wrapped where they are defined. The page's own
+            // page writes, and the call that registers a handler, are wrapped
+            // where Chromium defines them: on the prototype, with the flags it
+            // gave them and the engine's own getters. Each wrapper is written
+            // as a setter or a method, so its name and length are the
+            // engine's and it has no prototype of its own. The page's own
             // write happens first and this reports what it left behind.
             if (session) {
-                for (const name of ['metadata', 'playbackState']) {
-                    const property = Object.getOwnPropertyDescriptor(
-                        Object.getPrototypeOf(session), name);
-                    if (!property || !property.set) continue;
-                    Object.defineProperty(session, name, {
-                        configurable: true,
-                        enumerable: true,
-                        get() { return property.get.call(this); },
-                        set(value) { property.set.call(this, value); declare(); },
-                    });
+                const prototype = Object.getPrototypeOf(session);
+                const builtIn = {};
+                const wrappers = Object.getOwnPropertyDescriptors({
+                    set metadata(value) {
+                        builtIn.metadata.set.call(this, value);
+                        declare();
+                    },
+                    set playbackState(value) {
+                        builtIn.playbackState.set.call(this, value);
+                        declare();
+                    },
+                    setActionHandler(action, handler) {
+                        builtIn.setActionHandler.value.call(this, action, handler);
+                        if (handler) handlers.set(action, handler);
+                        else handlers.delete(action);
+                        declare();
+                    },
+                });
+                for (const [name, wrapper] of Object.entries(wrappers)) {
+                    const property = Object.getOwnPropertyDescriptor(prototype, name);
+                    if (!property || (wrapper.set ? !property.set : !property.value)) continue;
+                    builtIn[name] = property;
+                    Object.defineProperty(prototype, name, wrapper.set
+                        ? {...property, set: wrapper.set} : {...property, value: wrapper.value});
                 }
-                const setActionHandler = session.setActionHandler.bind(session);
-                session.setActionHandler = (action, handler) => {
-                    setActionHandler(action, handler);
-                    if (handler) handlers.set(action, handler);
-                    else handlers.delete(action);
-                    declare();
-                };
             }
             // Media events do not bubble, so the document listens in the
             // capture phase: a page that plays without a media session is still
             // a page the desktop hears.
             for (const name of ['play', 'pause', 'ended', 'emptied', 'loadedmetadata'])
                 document.addEventListener(name, declare, {capture: true, passive: true});
-            globalThis.__omawebMediaSession = {
+            const actions = {play: 'play', pause: 'pause', stop: 'stop',
+                             next: 'nexttrack', previous: 'previoustrack'};
+            const keys = {
                 invoke(command) {
                     const wanted = command === 'playpause'
                         ? (state() === 'playing' ? 'pause' : 'play') : command;
-                    const action = {play: 'play', pause: 'pause', stop: 'stop',
-                                    next: 'nexttrack', previous: 'previoustrack'}[wanted];
+                    const action = actions[wanted];
                     const handler = handlers.get(action);
                     if (handler) {
                         try {
@@ -2960,6 +3010,9 @@ Item {
                     declare();
                 },
             };
+            const token = ` + JSON.stringify(root.mediaKeyToken) + `;
+            for (const command of ['playpause', ...Object.keys(actions)])
+                document.addEventListener(token + command, () => keys.invoke(command));
             declare();
         })();`;
 
@@ -3472,7 +3525,7 @@ Item {
     // two places lost the scripts added to only one of them on the first page
     // load. A script that changes afterwards, a sheet with the theme or the
     // keyboard navigation with its configuration, goes in by installUserScript.
-    // The Content blocking script is the Engine profile's, not the view's.
+    // The Content blocking scripts are the Engine profile's, not the view's.
     function userScriptList() {
         return [root.editedStateScript, root.keyboardNavigationScript,
                 root.externalProtocolOriginScript, root.documentPaintedScript,

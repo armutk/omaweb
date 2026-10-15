@@ -311,6 +311,12 @@ private slots:
     void qtHandsOverATypedCardOnlyWhenTheShellAsksAfterASubmit();
     void qtOffersNoCardThePageWroteOrSubmitted();
     void qtKeepsItsPageReportsOutOfThePagesReach();
+    void qtLeavesThePageNoOmawebGlobal();
+    void qtHandsAMediaKeyToThePagesOwnHandler();
+    void qtShapesTheMediaSessionAsChromiumDoes();
+    void qtTellsAnEditedContentEditableFromAnUntouchedOne();
+    void qtReconfiguresKeyboardNavigationOnAnOpenPage();
+    void qtNamesTheLinkHintsByTheViewsOwnToken();
     void qtServesTheSubstitutesTheListsName();
     void qtCollapsesTheElementWhoseRequestItRefused();
     void qtStripsTheParametersTheListsName();
@@ -1843,7 +1849,7 @@ void QtEngineContractTest::qtKeyboardNavigationHonorsInputContracts_data()
             <script>
                 document.documentElement.style.zoom = '175%';
                 new MutationObserver(() => {
-                    const overlay = document.getElementById('__omaweb_link_hints');
+                    const overlay = document.getElementById('hintsh');
                     const hint = overlay && overlay.querySelector('span');
                     if (overlay && overlay.getAttribute('role') === 'status'
                             && overlay.getAttribute('aria-live') === 'polite'
@@ -1861,8 +1867,8 @@ void QtEngineContractTest::qtKeyboardNavigationHonorsInputContracts_data()
         << QByteArray(R"HTML(<!doctype html><title>ready</title>
             <a href="#target">Target</a><script>
                 new MutationObserver(() => {
-                    if (document.getElementById('__omaweb_link_hints')
-                            && document.activeElement.id === '__omaweb_link_hint_input')
+                    if (document.getElementById('hintsh')
+                            && document.activeElement.id === 'hintsi')
                         document.title = 'hint-focus';
                 }).observe(document.documentElement, { childList: true, subtree: true });
                 setTimeout(() => dispatchEvent(new KeyboardEvent('keydown', {
@@ -1874,7 +1880,7 @@ void QtEngineContractTest::qtKeyboardNavigationHonorsInputContracts_data()
         << QByteArray(R"HTML(<!doctype html><title>ready</title>
             <a href="#target">Target</a><script>
                 new MutationObserver(() => {
-                    const hint = document.querySelector('#__omaweb_link_hints > span');
+                    const hint = document.querySelector('#hintsh > span');
                     if (!hint) return;
                     const style = getComputedStyle(hint);
                     // The hint is the website's: an accent plate with the
@@ -1911,11 +1917,11 @@ void QtEngineContractTest::qtKeyboardNavigationHonorsInputContracts_data()
                     dispatchEvent(new KeyboardEvent('keydown', {
                         key: 'F', shiftKey: true, bubbles: true, cancelable: true
                     }));
-                    if (!document.getElementById('__omaweb_link_hints')) {
+                    if (!document.getElementById('hintsh')) {
                         setTimeout(activateBackgroundHint, 100);
                         return;
                     }
-                    const hint = document.querySelector('#__omaweb_link_hints > span');
+                    const hint = document.querySelector('#hintsh > span');
                     dispatchEvent(new KeyboardEvent('keydown', {
                         key: hint.textContent.toLowerCase(), bubbles: true, cancelable: true
                     }));
@@ -2114,6 +2120,9 @@ void QtEngineContractTest::qtKeyboardNavigationHonorsInputContracts()
         {QStringLiteral("currentUrl"), QUrl::fromLocalFile(page.fileName())},
         {QStringLiteral("keyboardNavigationConfiguration"), configuration},
         {QStringLiteral("keyboardNavigationScriptSource"), keyboardNavigationPageScript()},
+        // The hint layer's ids are the view's token and a letter, so the
+        // pages here, which look for the layer, are told the token.
+        {QStringLiteral("keyboardHintToken"), QStringLiteral("hints")},
     }));
     QVERIFY2(adapter, qPrintable(component.errorString()));
 
@@ -3169,10 +3178,12 @@ void QtEngineContractTest::qtReportsANameThatCouldNotBeLookedUp()
 void QtEngineContractTest::qtHidesCosmeticRulesBeforeThePageRuns_data()
 {
     QTest::addColumn<QByteArray>("tamper");
-    QTest::addColumn<int>("writes");
+    QTest::addColumn<int>("rewritten");
+    // The sheet the page found is written again by the survey, whatever it
+    // carries, unless the page dropped it: then another is adopted.
     QTest::newRow("unchanged") << QByteArray() << 1;
     QTest::newRow("dropped") << QByteArray("document.adoptedStyleSheets = [];") << 0;
-    QTest::newRow("cleared") << QByteArray("sheet.replaceSync('');") << 2;
+    QTest::newRow("cleared") << QByteArray("sheet.replaceSync('');") << 1;
     // A redirect target is a page like any other: its own site sheet from
     // its creation, written once more by its survey.
     QTest::newRow("redirect") << QByteArray("redirect") << 1;
@@ -3181,7 +3192,7 @@ void QtEngineContractTest::qtHidesCosmeticRulesBeforeThePageRuns_data()
 void QtEngineContractTest::qtHidesCosmeticRulesBeforeThePageRuns()
 {
     QFETCH(QByteArray, tamper);
-    QFETCH(int, writes);
+    QFETCH(int, rewritten);
     // The policy refuses inline style, which is what a page's own <style>
     // element carries and what an ad-hiding rule would arrive as. A rule that
     // stops hiding under a policy hides nothing on the sites that send one, so
@@ -3200,17 +3211,15 @@ void QtEngineContractTest::qtHidesCosmeticRulesBeforeThePageRuns()
             const state = () => (hidden("specific") ? "S" : "-")
                 + (hidden("generic") ? "G" : "-") + (hidden("article") ? "A" : "-");
             const first = state();
-            const sheet = document.adoptedStyleSheets.find(
-                adopted => adopted.omawebSheetId === "__omaweb_content_blocking");
-            let writes = 0;
-            const replaceSync = CSSStyleSheet.prototype.replaceSync;
-            CSSStyleSheet.prototype.replaceSync = function (rules) {
-                if (this === sheet) writes += 1;
-                return replaceSync.call(this, rules);
-            };
+            // Omaweb writes the sheet from its own world, so the page sees a
+            // write as rules that are not the ones it saw before.
+            const sheet = document.adoptedStyleSheets.find(adopted =>
+                Array.from(adopted.cssRules).some(rule => rule.selectorText === ".local-ad"));
+            const written = sheet.cssRules[0];
             TAMPER
             const report = () => {
-                document.title = first + "|" + state() + "|" + writes;
+                const rewritten = sheet.cssRules.length > 0 && sheet.cssRules[0] !== written;
+                document.title = first + "|" + state() + "|" + (rewritten ? 1 : 0);
                 requestAnimationFrame(report);
             };
             report();
@@ -3251,8 +3260,8 @@ void QtEngineContractTest::qtHidesCosmeticRulesBeforeThePageRuns()
     // one the load set out from, whose rule would hide the article instead.
     if (redirected)
         QTRY_COMPARE_WITH_TIMEOUT(adapter->property("currentUrl").toUrl(), pageUrl, 15000);
-    QTRY_COMPARE_WITH_TIMEOUT(
-        adapter->property("pageTitle").toString(), QStringLiteral("S--|SG-|%1").arg(writes), 15000);
+    QTRY_COMPARE_WITH_TIMEOUT(adapter->property("pageTitle").toString(),
+        QStringLiteral("S--|SG-|%1").arg(rewritten), 15000);
 
     // Turning the site off gives both back without a reload, the surveyed
     // rules included.
@@ -3495,8 +3504,8 @@ void QtEngineContractTest::qtHidesElementsAddedAfterLoad()
             const element = document.getElementById(id);
             return element && getComputedStyle(element).display === "none";
         };
-        const surveyed = () => document.adoptedStyleSheets.some(
-            sheet => sheet.omawebSheetId === "__omaweb_content_blocking_generic");
+        const surveyed = () => document.adoptedStyleSheets.some(sheet =>
+            Array.from(sheet.cssRules).some(rule => rule.selectorText === ".early-ad"));
         const started = performance.now();
         const arm = () => {
             if (!surveyed() && performance.now() - started < 2000) {
@@ -3578,8 +3587,8 @@ void QtEngineContractTest::qtHidesElementsAddedAfterLoad()
 void QtEngineContractTest::qtSurveysOnlyWhatThePageAddsAnew()
 {
     PageServer server(R"HTML(<!doctype html><html><body class="ad"><script>
-        const surveyed = () => document.adoptedStyleSheets.some(
-            sheet => sheet.omawebSheetId === "__omaweb_content_blocking_generic");
+        const surveyed = () => document.adoptedStyleSheets.some(sheet =>
+            Array.from(sheet.cssRules).some(rule => rule.selectorText === ".ad"));
         const add = (className, id) => {
             const element = document.createElement("div");
             if (className) element.className = className;
@@ -3724,8 +3733,8 @@ void QtEngineContractTest::qtSkipsTheLateSurveyOnAGenerichideSite()
 void QtEngineContractTest::qtStartsTheWatchOverOnNavigation()
 {
     PageServer server(R"HTML(<!doctype html><html><body class="ad"><script>
-        const surveyed = () => document.adoptedStyleSheets.some(
-            sheet => sheet.omawebSheetId === "__omaweb_content_blocking_generic");
+        const surveyed = () => document.adoptedStyleSheets.some(sheet =>
+            Array.from(sheet.cssRules).some(rule => rule.selectorText === ".ad"));
         const arm = () => {
             if (!surveyed()) {
                 setTimeout(arm, 20);
@@ -5798,6 +5807,411 @@ void QtEngineContractTest::qtKeepsItsPageReportsOutOfThePagesReach()
     QVERIFY2(settled >= 1 && settled <= 2, qPrintable(QString::number(settled)));
     QTest::qWait(2500);
     QCOMPARE(scrollReports(), settled);
+}
+
+// Omaweb's scripts in a page keep their handles where the page's own scripts
+// cannot name them, so no script can tell the browser is Omaweb from its
+// globals, or call one. The page lists every global it holds whose name is
+// Omaweb's, and every property of its own on the style sheets Omaweb adopted
+// into it, once it is up and again after the shell has configured keyboard
+// navigation, handed it a media key and asked whether it was edited, which
+// is when a handle is used. The scrollbar's sheet is always there, so the
+// sheets are never an empty list.
+void QtEngineContractTest::qtLeavesThePageNoOmawebGlobal()
+{
+    PageServer server(R"HTML(<!doctype html><html><head><title>loading</title>
+        <script>
+            globalThis.omawebGlobals = () => {
+                const names = Reflect.ownKeys(globalThis).map(String)
+                    .filter(name => name.startsWith("__omaweb"));
+                const sheets = document.adoptedStyleSheets;
+                for (const sheet of sheets)
+                    names.push(...Reflect.ownKeys(sheet).map(name => "sheet." + String(name)));
+                return (sheets.length > 0 ? "" : "no sheet:") + (names.join(",") || "none");
+            };
+            addEventListener("load", () => setTimeout(() => {
+                document.title = "up:" + omawebGlobals();
+            }, 300));
+        </script>
+    </head><body><p contenteditable="true">page</p></body></html>)HTML");
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QQmlEngine engine;
+    QQmlComponent component(
+        &engine, QUrl::fromLocalFile(QStringLiteral(OMAWEB_QT_ENGINE_VIEW_PATH)));
+    const QVariantMap configuration = {
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("enabled"), true},
+        {QStringLiteral("bindings"),
+            QVariantMap {{QStringLiteral("j"), QStringLiteral("scroll-down")}}},
+        {QStringLiteral("passthroughAll"), false},
+        {QStringLiteral("passthroughKeys"), QStringList {}},
+    };
+    const std::unique_ptr<QObject> adapter(component.createWithInitialProperties({
+        {QStringLiteral("profilePath"), root.filePath(QStringLiteral("profile"))},
+        {QStringLiteral("keyboardNavigationConfiguration"), configuration},
+        {QStringLiteral("keyboardNavigationScriptSource"), keyboardNavigationPageScript()},
+    }));
+    QVERIFY2(adapter, qPrintable(component.errorString()));
+    QQuickWindow window;
+    window.resize(640, 480);
+    auto *view = qobject_cast<QQuickItem *>(adapter.get());
+    QVERIFY(view);
+    view->setParentItem(window.contentItem());
+    view->setSize(QSizeF(640, 480));
+    window.show();
+
+    const QUrl pageUrl(QStringLiteral("http://127.0.0.1:%1/page.html").arg(server.serverPort()));
+    QVERIFY(adapter->setProperty("currentUrl", pageUrl));
+    QTRY_VERIFY_WITH_TIMEOUT(adapter->property("pageTitle").toString().startsWith("up:"), 15000);
+    QCOMPARE(adapter->property("pageTitle").toString(), QStringLiteral("up:none"));
+
+    QVERIFY(QMetaObject::invokeMethod(
+        adapter.get(), "configureKeyboardNavigation", Q_ARG(QVariant, configuration)));
+    QVERIFY(QMetaObject::invokeMethod(
+        adapter.get(), "invokeMediaAction", Q_ARG(QVariant, QStringLiteral("pause"))));
+    // Asked last, and answered after the two before it have run, which is
+    // when the page looks again.
+    QObject answers;
+    QJSEngine::setObjectOwnership(&answers, QJSEngine::CppOwnership);
+    const auto callback
+        = engine.evaluate(QStringLiteral("(answers => () => { answers.objectName = 'answered'; })"))
+              .call({engine.newQObject(&answers)});
+    QVERIFY(QMetaObject::invokeMethod(
+        adapter.get(), "checkForEditedFormState", Q_ARG(QVariant, QVariant::fromValue(callback))));
+    QTRY_COMPARE(answers.objectName(), QStringLiteral("answered"));
+
+    auto *webView = adapter->findChild<QObject *>(QStringLiteral("qtWebView"));
+    QVERIFY(webView);
+    QVERIFY(QMetaObject::invokeMethod(webView, "runJavaScript",
+        Q_ARG(QString, QStringLiteral("document.title = 'used:' + omawebGlobals();"))));
+    QTRY_VERIFY_WITH_TIMEOUT(adapter->property("pageTitle").toString().startsWith("used:"), 5000);
+    QCOMPARE(adapter->property("pageTitle").toString(), QStringLiteral("used:none"));
+}
+
+// A media key the desktop sends reaches the handler the page registered for
+// it, and a key the page registered nothing for reaches the element on show.
+// No sound plays: the page's media has no source.
+void QtEngineContractTest::qtHandsAMediaKeyToThePagesOwnHandler()
+{
+    PageServer server(R"HTML(<!doctype html><html><head><title>loading</title></head><body>
+        <video id="video"></video>
+        <script>
+            const heard = [];
+            const tell = () => { document.title = heard.join(",") || "ready"; };
+            navigator.mediaSession.setActionHandler("nexttrack", () => {
+                heard.push("next");
+                tell();
+            });
+            const video = document.getElementById("video");
+            video.pause = () => {
+                heard.push("paused");
+                tell();
+            };
+            addEventListener("load", tell);
+        </script>
+    </body></html>)HTML");
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QQmlEngine engine;
+    QQmlComponent component(
+        &engine, QUrl::fromLocalFile(QStringLiteral(OMAWEB_QT_ENGINE_VIEW_PATH)));
+    const std::unique_ptr<QObject> adapter(component.createWithInitialProperties({
+        {QStringLiteral("profilePath"), root.filePath(QStringLiteral("profile"))},
+    }));
+    QVERIFY2(adapter, qPrintable(component.errorString()));
+    QQuickWindow window;
+    window.resize(640, 480);
+    auto *view = qobject_cast<QQuickItem *>(adapter.get());
+    QVERIFY(view);
+    view->setParentItem(window.contentItem());
+    view->setSize(QSizeF(640, 480));
+    window.show();
+
+    const QUrl pageUrl(QStringLiteral("http://127.0.0.1:%1/page.html").arg(server.serverPort()));
+    QVERIFY(adapter->setProperty("currentUrl", pageUrl));
+    QTRY_COMPARE_WITH_TIMEOUT(
+        adapter->property("pageTitle").toString(), QStringLiteral("ready"), 15000);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        adapter.get(), "invokeMediaAction", Q_ARG(QVariant, QStringLiteral("next"))));
+    QTRY_COMPARE_WITH_TIMEOUT(
+        adapter->property("pageTitle").toString(), QStringLiteral("next"), 5000);
+    QVERIFY(QMetaObject::invokeMethod(
+        adapter.get(), "invokeMediaAction", Q_ARG(QVariant, QStringLiteral("pause"))));
+    QTRY_COMPARE_WITH_TIMEOUT(
+        adapter->property("pageTitle").toString(), QStringLiteral("next,paused"), 5000);
+}
+
+// Omaweb wraps the media session's setters in the page's own world, and a
+// page that inspects the session finds it shaped as Chromium shapes it: the
+// same names on the same objects, with the same flags, and functions of the
+// same name and length. The page's own frame has the wrapper and a blank
+// subframe does not, since the script runs in no subframe, so the subframe
+// is Chromium's own answer. The functions' source is not compared: it is
+// Omaweb's, and hiding it would mean replacing Function.prototype.toString
+// for the whole page, which a page can detect in turn.
+void QtEngineContractTest::qtShapesTheMediaSessionAsChromiumDoes()
+{
+    PageServer server(R"HTML(<!doctype html><html><head><title>loading</title></head><body>
+        <iframe src="about:blank"></iframe>
+        <script>
+            const describe = value => value === undefined ? "-"
+                : typeof value === "function"
+                    ? "function " + value.name + "/" + value.length + "/" + ("prototype" in value)
+                    : typeof value;
+            const shape = view => {
+                const session = view.navigator.mediaSession;
+                const prototype = view.MediaSession.prototype;
+                const names = Object.getOwnPropertyNames(prototype).sort();
+                const lines = [
+                    "own: " + Reflect.ownKeys(session).map(String).join(","),
+                    "prototype: " + names.join(","),
+                    "shared: " + (session.setActionHandler === prototype.setActionHandler),
+                ];
+                try {
+                    session.setActionHandler("unheard-of", () => {});
+                    lines.push("refused: nothing");
+                } catch (error) {
+                    lines.push("refused: " + error.name + " " + error.message);
+                }
+                for (const name of names) {
+                    const property = Object.getOwnPropertyDescriptor(prototype, name);
+                    lines.push(name + ": " + [property.enumerable, property.configurable,
+                        property.writable, describe(property.get), describe(property.set),
+                        describe(property.value)].join(" "));
+                }
+                return lines;
+            };
+            addEventListener("load", () => {
+                const page = shape(window);
+                const chromium = shape(document.querySelector("iframe").contentWindow);
+                const differences = page.filter((line, index) => line !== chromium[index]);
+                document.title = differences.length === 0 && page.length === chromium.length
+                    ? "same" : "differs: " + differences.join(" | ");
+            });
+        </script>
+    </body></html>)HTML");
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QQmlEngine engine;
+    QQmlComponent component(
+        &engine, QUrl::fromLocalFile(QStringLiteral(OMAWEB_QT_ENGINE_VIEW_PATH)));
+    const std::unique_ptr<QObject> adapter(component.createWithInitialProperties({
+        {QStringLiteral("profilePath"), root.filePath(QStringLiteral("profile"))},
+    }));
+    QVERIFY2(adapter, qPrintable(component.errorString()));
+    QQuickWindow window;
+    window.resize(640, 480);
+    auto *view = qobject_cast<QQuickItem *>(adapter.get());
+    QVERIFY(view);
+    view->setParentItem(window.contentItem());
+    view->setSize(QSizeF(640, 480));
+    window.show();
+
+    const QUrl pageUrl(QStringLiteral("http://127.0.0.1:%1/page.html").arg(server.serverPort()));
+    QVERIFY(adapter->setProperty("currentUrl", pageUrl));
+    QTRY_VERIFY_WITH_TIMEOUT(adapter->property("pageTitle").toString() == QStringLiteral("same")
+            || adapter->property("pageTitle").toString().startsWith("differs"),
+        15000);
+    QCOMPARE(adapter->property("pageTitle").toString(), QStringLiteral("same"));
+}
+
+// Closing a tab asks first when the reader has typed into it, and text typed
+// into an editable element has no default value to compare with, so the page
+// is watched for it as it is typed.
+void QtEngineContractTest::qtTellsAnEditedContentEditableFromAnUntouchedOne()
+{
+    PageServer server(R"HTML(<!doctype html><html><head><title>ready</title></head>
+        <body><div id="note" contenteditable="true">note</div></body></html>)HTML");
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QQmlEngine engine;
+    QQmlComponent component(
+        &engine, QUrl::fromLocalFile(QStringLiteral(OMAWEB_QT_ENGINE_VIEW_PATH)));
+    const std::unique_ptr<QObject> adapter(component.createWithInitialProperties({
+        {QStringLiteral("profilePath"), root.filePath(QStringLiteral("profile"))},
+    }));
+    QVERIFY2(adapter, qPrintable(component.errorString()));
+    QQuickWindow window;
+    window.resize(640, 480);
+    auto *view = qobject_cast<QQuickItem *>(adapter.get());
+    QVERIFY(view);
+    view->setParentItem(window.contentItem());
+    view->setSize(QSizeF(640, 480));
+    window.show();
+
+    const QUrl pageUrl(QStringLiteral("http://127.0.0.1:%1/page.html").arg(server.serverPort()));
+    QVERIFY(adapter->setProperty("currentUrl", pageUrl));
+    QTRY_COMPARE_WITH_TIMEOUT(
+        adapter->property("pageTitle").toString(), QStringLiteral("ready"), 15000);
+    QTRY_VERIFY(!adapter->property("loading").toBool());
+
+    QObject answers;
+    QJSEngine::setObjectOwnership(&answers, QJSEngine::CppOwnership);
+    const auto ask = [&] {
+        answers.setObjectName({});
+        const auto callback
+            = engine
+                  .evaluate(QStringLiteral(
+                      "(answers => edited => { answers.objectName = String(edited); })"))
+                  .call({engine.newQObject(&answers)});
+        QVERIFY(QMetaObject::invokeMethod(adapter.get(), "checkForEditedFormState",
+            Q_ARG(QVariant, QVariant::fromValue(callback))));
+    };
+
+    ask();
+    QTRY_COMPARE(answers.objectName(), QStringLiteral("false"));
+
+    auto *webView = adapter->findChild<QObject *>(QStringLiteral("qtWebView"));
+    QVERIFY(webView);
+    QVERIFY(QMetaObject::invokeMethod(webView, "runJavaScript",
+        Q_ARG(QString,
+            QStringLiteral("document.getElementById('note').focus();"
+                           "document.execCommand('insertText', false, 'typed');"
+                           "document.title = 'typed';"))));
+    QTRY_COMPARE(adapter->property("pageTitle").toString(), QStringLiteral("typed"));
+    ask();
+    QTRY_COMPARE(answers.objectName(), QStringLiteral("true"));
+}
+
+// A binding the reader changes reaches the pages already open, not only the
+// ones loaded after it: a page that came up with keyboard navigation off
+// scrolls on its key once the shell turns it on.
+void QtEngineContractTest::qtReconfiguresKeyboardNavigationOnAnOpenPage()
+{
+    const QByteArray html(R"HTML(<!doctype html><title>ready</title>
+        <body style="margin:0"><div style="height:3000px"></div>
+        <script>
+            addEventListener("scroll", () => {
+                if (scrollY > 0) document.title = "scrolled";
+            });
+        </script>)HTML");
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QFile page(root.filePath(QStringLiteral("keyboard.html")));
+    QVERIFY(page.open(QIODevice::WriteOnly));
+    QCOMPARE(page.write(html), html.size());
+    page.close();
+
+    QQmlEngine engine;
+    QQmlComponent component(
+        &engine, QUrl::fromLocalFile(QStringLiteral(OMAWEB_QT_ENGINE_VIEW_PATH)));
+    QVariantMap configuration = {
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("enabled"), false},
+        {QStringLiteral("bindings"),
+            QVariantMap {{QStringLiteral("j"), QStringLiteral("scroll-down")}}},
+        {QStringLiteral("passthroughAll"), false},
+        {QStringLiteral("passthroughKeys"), QStringList {}},
+    };
+    const std::unique_ptr<QObject> adapter(component.createWithInitialProperties({
+        {QStringLiteral("currentUrl"), QUrl::fromLocalFile(page.fileName())},
+        {QStringLiteral("keyboardNavigationConfiguration"), configuration},
+        {QStringLiteral("keyboardNavigationScriptSource"), keyboardNavigationPageScript()},
+    }));
+    QVERIFY2(adapter, qPrintable(component.errorString()));
+    auto *view = qobject_cast<QQuickItem *>(adapter.get());
+    QVERIFY(view);
+    QQuickWindow window;
+    window.resize(640, 480);
+    view->setParentItem(window.contentItem());
+    view->setSize(QSizeF(640, 480));
+    window.show();
+    window.requestActivate();
+    QVERIFY(QMetaObject::invokeMethod(adapter.get(), "focusPage"));
+    QTRY_VERIFY(adapter->property("pageHasFocus").toBool());
+    QTRY_COMPARE(adapter->property("pageTitle").toString(), QStringLiteral("ready"));
+
+    // Off, the key is the page's and nothing moves.
+    QTest::keyClick(&window, Qt::Key_J);
+    QTest::qWait(300);
+    QCOMPARE(adapter->property("pageTitle").toString(), QStringLiteral("ready"));
+
+    configuration.insert(QStringLiteral("enabled"), true);
+    QVERIFY(QMetaObject::invokeMethod(
+        adapter.get(), "configureKeyboardNavigation", Q_ARG(QVariant, configuration)));
+    QTest::qWait(50);
+    QTest::keyClick(&window, Qt::Key_J);
+    QTRY_COMPARE_WITH_TIMEOUT(
+        adapter->property("pageTitle").toString(), QStringLiteral("scrolled"), 5000);
+}
+
+// What keyboard navigation draws in a page, the key sequence it is reading
+// and the hint layer, carries no name of Omaweb's: its ids are the view's own
+// token and a letter, and a page that watches every element added to it
+// learns nothing it could look for in another view.
+void QtEngineContractTest::qtNamesTheLinkHintsByTheViewsOwnToken()
+{
+    const QByteArray html(R"HTML(<!doctype html><title>ready</title>
+        <a href="#target">Target</a>
+        <script>
+            const ids = [];
+            const collect = node => {
+                if (node.nodeType !== Node.ELEMENT_NODE) return;
+                if (node.id) ids.push(node.id);
+                for (const child of node.children) collect(child);
+            };
+            new MutationObserver(records => {
+                for (const record of records) record.addedNodes.forEach(collect);
+            }).observe(document.documentElement, { childList: true, subtree: true });
+            const press = key => dispatchEvent(new KeyboardEvent("keydown", {
+                key, bubbles: true, cancelable: true
+            }));
+            // A sequence's first key, left to run out, then the hints.
+            setTimeout(() => press("g"), 300);
+            setTimeout(() => press("f"), 1300);
+            setTimeout(() => { document.title = "ids:" + ids.join(","); }, 1800);
+        </script>)HTML");
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QFile page(root.filePath(QStringLiteral("keyboard.html")));
+    QVERIFY(page.open(QIODevice::WriteOnly));
+    QCOMPARE(page.write(html), html.size());
+    page.close();
+
+    QQmlEngine engine;
+    QQmlComponent component(
+        &engine, QUrl::fromLocalFile(QStringLiteral(OMAWEB_QT_ENGINE_VIEW_PATH)));
+    const QVariantMap configuration = {
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("enabled"), true},
+        {QStringLiteral("bindings"),
+            QVariantMap {
+                {QStringLiteral("gg"), QStringLiteral("scroll-top")},
+                {QStringLiteral("f"), QStringLiteral("open-link")},
+            }},
+        {QStringLiteral("passthroughAll"), false},
+        {QStringLiteral("passthroughKeys"), QStringList {}},
+    };
+    const std::unique_ptr<QObject> adapter(component.createWithInitialProperties({
+        {QStringLiteral("currentUrl"), QUrl::fromLocalFile(page.fileName())},
+        {QStringLiteral("keyboardNavigationConfiguration"), configuration},
+        {QStringLiteral("keyboardNavigationScriptSource"), keyboardNavigationPageScript()},
+    }));
+    QVERIFY2(adapter, qPrintable(component.errorString()));
+    auto *view = qobject_cast<QQuickItem *>(adapter.get());
+    QVERIFY(view);
+    QQuickWindow window;
+    window.resize(640, 480);
+    view->setParentItem(window.contentItem());
+    view->setSize(QSizeF(640, 480));
+    window.show();
+
+    const auto token = adapter->property("keyboardHintToken").toString();
+    QVERIFY(token.size() >= 8);
+    QVERIFY(!token.contains(QStringLiteral("omaweb"), Qt::CaseInsensitive));
+    QTRY_VERIFY_WITH_TIMEOUT(adapter->property("pageTitle").toString().startsWith("ids:"), 15000);
+    QCOMPARE(
+        adapter->property("pageTitle").toString(), QStringLiteral("ids:%1s,%1h,%1i").arg(token));
 }
 
 // A page that asks for a tracker and is handed nothing waits forever, which is
