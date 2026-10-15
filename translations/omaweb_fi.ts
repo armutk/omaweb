@@ -4160,6 +4160,10 @@ Laajennuksen kytkeminen päälle lataa sen Chrome Web Storesta, mikä kertoo Goo
         <translation>Automaattiset lataukset</translation>
     </message>
     <message>
+        <source>Clipboard</source>
+        <translation>Leikepöytä</translation>
+    </message>
+    <message>
         <source>Blocked requests</source>
         <translation>Estetyt pyynnöt</translation>
     </message>

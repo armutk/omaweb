@@ -4182,7 +4182,8 @@ int BrowserController::permissionPolicy(const QString &permission) const
     const auto normalizedPermission = permission.trimmed().toLower();
     // The capabilities whose answer belongs to the origin rather than to the
     // moment: the reader can see afterwards that a site holds one, and take it
-    // back where Site information lists it.
+    // back where Site information lists it. Clipboard read is one, as Chrome
+    // keeps its answer for the site (ADR 0069).
     static const QSet<QString> rememberable {
         QStringLiteral("camera"),
         QStringLiteral("microphone"),
@@ -4190,12 +4191,12 @@ int BrowserController::permissionPolicy(const QString &permission) const
         QStringLiteral("geolocation"),
         QStringLiteral("notifications"),
         QStringLiteral("automatic-downloads"),
-    };
-    // Reading the clipboard and sharing a screen hand over whatever happens to
-    // be there at that instant, which no earlier answer could have covered. So
-    // they are asked every time and no answer is written down.
-    static const QSet<QString> eachTime {
         QStringLiteral("clipboard-read"),
+    };
+    // Answered for the request and never for the origin. Sharing a screen
+    // hands over whatever happens to be there at that instant, which no
+    // earlier answer could have covered, so no answer is written down.
+    static const QSet<QString> eachTime {
         QStringLiteral("screen-sharing"),
         QStringLiteral("pointer-lock"),
         QStringLiteral("local-fonts"),
