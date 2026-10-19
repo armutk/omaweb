@@ -478,13 +478,10 @@ Item {
         // The typed text is the selection, except where it starts an open
         // tab's title or host: the reader is naming that tab, and Return goes
         // to it rather than opening it a second time. Another Space's tab is
-        // named only where no tab of the Space on show holds the text.
-        let named = widened() && all.length > 0 && all[0].row.kind === "tab" && all[0].strength
-            === 3 ? all[0].row : null;
-        if (named !== null && named.spaceId && all.some(function (entry) {
-            return entry.row.kind === "tab" && !entry.row.spaceId;
-        }))
-            named = null;
+        // never named: Return opens the text in the Space on show, and arrowing
+        // to that tab switches there.
+        const named = widened() && all.length > 0 && all[0].row.kind === "tab" && all[0].strength
+              === 3 && !all[0].row.spaceId ? all[0].row : null;
         keepSpaceOnShowTabsFirst(all);
         const next = [];
         let listedCommands = 0;
@@ -734,6 +731,48 @@ Item {
         return namesAPage(row.kind) ? row.url : null;
     }
 
+    readonly property var selectedRow: selected >= 0 && selected < rows.length ? rows[selected] :
+                                                                                 null
+
+    // The Space the selected row switches to, as its id, name and colour,
+    // or null where Return stays in the Space on show.
+    readonly property var modeSpace: {
+        const row = selectedRow;
+        if (row === null || commandScope && row.kind !== "command")
+            return null;
+        if (row.kind === "tab" && row.spaceId)
+            return {
+                "id": row.spaceId,
+                "name": row.spaceName,
+                "colour": row.spaceColor
+            };
+        return row.kind === "space" ? {
+                                          "id": row.argument,
+                                          "name": row.title,
+                                          "colour": row.color
+                                      } : null;
+    }
+
+    // What Return does, for the field's right-hand label, following the
+    // selected row. Typed text with no row selected opens in this tab, or in
+    // a new one for a new-tab Omnibar.
+    readonly property string modeText: {
+        const row = selectedRow;
+        if (row !== null && modeSpace !== null)
+            return qsTr("Switch to %1").arg(switchName.elidedText);
+        if (row !== null && row.kind === "tab")
+            return qsTr("Switch to Tab");
+        if (row !== null && row.kind === "command")
+            return qsTr("Run");
+        if (row !== null && row.kind === "suggestion")
+            return qsTr("Search");
+        if (row !== null && namesAPage(row.kind))
+            return qsTr("Open");
+        if (commandScope)
+            return qsTr("Command");
+        return newTabIntent ? qsTr("New Tab") : qsTr("This Tab");
+    }
+
     // Stepping fills the field with the selected row, as the arrows do in
     // Chrome. Filling is not typing: the field's change handler skips it, so
     // the list is neither asked nor ranked again.
@@ -977,7 +1016,7 @@ Item {
                 id: input
                 objectName: "omnibarInput"
                 anchors.left: chip.right
-                anchors.right: modeLabel.left
+                anchors.right: modeMark.visible ? modeMark.left : modeLabel.left
                 anchors.leftMargin: chip.visible ? 8 : 0
                 anchors.rightMargin: 10
                 anchors.verticalCenter: parent.verticalCenter
@@ -1121,11 +1160,43 @@ Item {
                 anchors.right: goMark.left
                 anchors.rightMargin: 14
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.commandScope ? qsTr("Command") : (root.newTabIntent ? qsTr("New Tab") :
-                                                                                 qsTr("This Tab"))
+                text: root.modeText
                 color: root.colors.mutedText
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
+            }
+
+            Rectangle {
+                id: modeMark
+                readonly property int modeMarkSize: 10
+                objectName: "omnibarModeMark"
+                anchors.right: modeLabel.left
+                anchors.rightMargin: Style.spacing.sm
+                y: DevicePixels.snap((parent.height - height) / 2, root.pixelRatio)
+                visible: root.modeSpace !== null
+                width: modeMarkSize
+                height: modeMarkSize
+                radius: 2
+                color: root.modeSpace !== null ? root.spaceColourOf(root.modeSpace.id,
+                                                                    root.modeSpace.colour) :
+                                                 "transparent"
+            }
+
+            // The name is cut to what is left of a third of the field once
+            // "Switch to" and the square are whole.
+            TextMetrics {
+                id: switchPrefix
+                font: modeLabel.font
+                text: qsTr("Switch to %1").arg("")
+            }
+
+            TextMetrics {
+                id: switchName
+                font: modeLabel.font
+                elide: Text.ElideRight
+                elideWidth: Math.max(0, header.width / 3 - switchPrefix.advanceWidth
+                                     - modeMark.width - Style.spacing.sm)
+                text: root.modeSpace !== null ? root.modeSpace.name : ""
             }
 
             Rectangle {
