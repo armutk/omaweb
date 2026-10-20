@@ -220,6 +220,25 @@ QtContentBlocker::QtContentBlocker(ContentBlocker *contentBlocker,
     m_globalPrivacyControlScript.setWorldId(QWebEngineScript::MainWorld);
     m_globalPrivacyControlScript.setRunsOnSubFrames(true);
     m_globalPrivacyControlScript.setSourceCode(GlobalPrivacyControl::scriptSource());
+    // Chrome's renderer gives every page a `window.chrome.app`, and QtWebEngine
+    // gives none. Without it Google's sign-in turns the browser away as one that
+    // "may not be secure" (rrk=46) as soon as an address is entered (#711). This
+    // is the object Chrome answers with for a page that is no installed app,
+    // defined before the page's first script, in every frame.
+    m_chromeAppScript.setName(QStringLiteral("Omaweb chrome.app"));
+    m_chromeAppScript.setInjectionPoint(QWebEngineScript::DocumentCreation);
+    m_chromeAppScript.setWorldId(QWebEngineScript::MainWorld);
+    m_chromeAppScript.setRunsOnSubFrames(true);
+    m_chromeAppScript.setSourceCode(QStringLiteral(
+        "(() => { const chrome = window.chrome || (window.chrome = {}); if (chrome.app) return;"
+        " chrome.app = { isInstalled: false,"
+        " InstallState: { DISABLED: 'disabled', INSTALLED: 'installed',"
+        " NOT_INSTALLED: 'not_installed' },"
+        " RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run',"
+        " RUNNING: 'running' },"
+        " getDetails() { return null; }, getIsInstalled() { return false; },"
+        " installState(callback) { if (callback) callback('not_installed'); },"
+        " runningState() { return 'cannot_run'; } }; })()"));
     if (m_globalPrivacyControl) {
         connect(m_globalPrivacyControl, &GlobalPrivacyControl::enabledChanged, this,
             &QtContentBlocker::applyGlobalPrivacyControl);
@@ -268,6 +287,20 @@ void QtContentBlocker::installGlobalPrivacyControlScript(QObject *profile, bool 
         || !QMetaObject::invokeMethod(collection, wanted ? "insert" : "remove",
             Q_ARG(QWebEngineScript, m_globalPrivacyControlScript))) {
         qWarning("Global Privacy Control could not reach the profile's script collection.");
+    }
+}
+
+void QtContentBlocker::installChromeAppScript(QObject *profile) const
+{
+    if (auto *widgetProfile = qobject_cast<QWebEngineProfile *>(profile)) {
+        widgetProfile->scripts()->insert(m_chromeAppScript);
+        return;
+    }
+    auto *collection = profile->property("userScripts").value<QObject *>();
+    if (!collection
+        || !QMetaObject::invokeMethod(
+            collection, "insert", Q_ARG(QWebEngineScript, m_chromeAppScript))) {
+        qWarning("window.chrome.app could not reach the profile's script collection.");
     }
 }
 
@@ -321,6 +354,7 @@ bool QtContentBlocker::attachToProfile(QObject *profileObject, const QString &sp
         if (!attached) {
             m_profiles.emplace_back(profileObject);
             installGlobalPrivacyControlScript(profileObject, sendsGlobalPrivacyControl());
+            installChromeAppScript(profileObject);
             // The engine derives the header and `navigator.languages` from this one value, so
             // every Space, Agent Space and Private profile tells sites the interface's language.
             profile->setHttpAcceptLanguage(acceptLanguage(requestedLocale()));

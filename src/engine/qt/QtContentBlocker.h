@@ -76,6 +76,7 @@ signals:
 private:
     void applyGlobalPrivacyControl();
     void installGlobalPrivacyControlScript(QObject *profile, bool wanted) const;
+    void installChromeAppScript(QObject *profile) const;
 
     ContentBlocker *m_contentBlocker;
     const GlobalPrivacyControl *m_globalPrivacyControl;
@@ -84,6 +85,9 @@ private:
     // The script that defines `navigator.globalPrivacyControl`, one instance
     // so that the collection it was inserted into can be asked to remove it.
     QWebEngineScript m_globalPrivacyControlScript;
+    // The script that defines `window.chrome.app`, which Google's sign-in
+    // reads before it lets a Chrome-like browser in (#711).
+    QWebEngineScript m_chromeAppScript;
     // Every profile attached so far, because turning the signal off has to
     // reach the script already installed on each of them. A profile that has
     // been destroyed reads as null and is skipped.
